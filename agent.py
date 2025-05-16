@@ -4,16 +4,33 @@ from collections import defaultdict, deque
 import numpy as np
 
 """====================================================================
-Adaptive multi-robot agent – v6-parking
---------------------------------------
-Adds *parking behaviour* for job-less robots:
+Adaptive multi-robot agent – v7-cbs
+----------------------------------
+Adds an **on-demand Conflict-Based Search (CBS)** fallback:
 
-⊳  Dead-ends and low-degree side cells are pre-computed as parking spots.
-⊳  An idle robot heads for the nearest unoccupied spot, freeing corridors.
-⊳  Keeps multi-priority (N_PERMUTATIONS) search from v5-slow.
+⊳  Run WPP with N permutations (default 3 000).
+⊳  If its best score  >  LB × 1.5   (LB = sum shortest paths) →
+    invoke CBS with a 60-step horizon to find an optimal joint plan.
+⊳  CBS prunes when node count > MAX_CBS_NODES (default 20 000)
+    to keep runtime finite.
 
-Tune constants below to balance speed vs score.
+Keeps:
+• Parking for idle robots (dead-end & side-cell spots).
+• True-distance Hungarian assignment.
+• Adaptive horizons & stall detector.
+
+Tune constants at the top for speed / quality.
 ===================================================================="""
+
+
+# -------------------------------------------------------------------
+# Tunable constants
+# -------------------------------------------------------------------
+N_PERMUTATIONS      = 100    # WPP priority samples
+CBS_HORIZON         = 60      # joint-plan depth for CBS
+CBS_THRESHOLD_FACTOR = 1.5    # when to trigger CBS ( > LB×factor )
+MAX_CBS_NODES       = 20000   # hard cap on CBS high-level nodes
+RANDOM_SEED         = 42
 
 
 # -------------------------------------------------------------------
@@ -34,7 +51,7 @@ def manhattan(a, b):
 
 
 # -------------------------------------------------------------------
-# Hungarian solver  (square-pad, n ≤ 20, O(n³))
+# Hungarian solver (square-pad, n ≤ 20)
 # -------------------------------------------------------------------
 def hungarian(cost_matrix):
     cost = np.array(cost_matrix, float).copy()
@@ -92,12 +109,12 @@ def hungarian(cost_matrix):
 # -------------------------------------------------------------------
 # Windowed Prioritised Planner
 # -------------------------------------------------------------------
-class AWPPlanner:
-    def __init__(self, grid, horizon, reserve_horizon):
+class WPP:
+    def __init__(self, grid, H, RH):
         self.grid = grid
         self.rows, self.cols = grid.shape
-        self.H = horizon
-        self.RH = reserve_horizon
+        self.H  = H     # planning horizon
+        self.RH = RH    # reservation horizon
 
     def in_bounds(self, p): return 0 <= p[0] < self.rows and 0 <= p[1] < self.cols
     def passable(self, p): return self.grid[p] == 0
@@ -108,7 +125,7 @@ class AWPPlanner:
             if self.in_bounds(nxt) and self.passable(nxt):
                 yield nxt
 
-    # -------- joint plan respecting a given robot order --------
+    # --- joint plan respecting a given robot order ---
     def plan_all(self, starts, goals, order=None):
         n = len(starts)
         order = list(order) if order is not None else list(range(n))
@@ -129,14 +146,13 @@ class AWPPlanner:
     def _a_star(self, start, goal, res_v, res_e):
         if start == goal:
             return [start]
-        open_heap = [(manhattan(start, goal), 0, start, 0, None)]
-        best_g = {}
-
-        while open_heap:
-            f, g, pos, t, parent = heapq.heappop(open_heap)
-            if best_g.get((pos, t), 1e9) <= g:
+        pq = [(manhattan(start, goal), 0, start, 0, None)]
+        best = {}
+        while pq:
+            f, g, pos, t, parent = heapq.heappop(pq)
+            if best.get((pos, t), 1e9) <= g:
                 continue
-            best_g[(pos, t)] = g
+            best[(pos, t)] = g
             if pos == goal or t >= self.H:
                 return self._reconstruct((pos, t, parent))
             for nxt in self.neighbors(pos):
@@ -146,7 +162,7 @@ class AWPPlanner:
                     continue
                 ng = g + 1
                 nf = ng + manhattan(nxt, goal)
-                heapq.heappush(open_heap, (nf, ng, nxt, t + 1, (pos, t, parent)))
+                heapq.heappush(pq, (nf, ng, nxt, t + 1, (pos, t, parent)))
         return [start]
 
     @staticmethod
@@ -156,6 +172,140 @@ class AWPPlanner:
             pos, t, node = node
             path.append(pos)
         return list(reversed(path))
+
+
+# -------------------------------------------------------------------
+# Conflict-Based Search (optimises joint plan for fixed horizon)
+# -------------------------------------------------------------------
+class CBS:
+    class Constraint:
+        def __init__(self, agent, cell, time, edge=None):
+            self.agent, self.cell, self.time, self.edge = agent, cell, time, edge  # edge = (from,to)
+
+        def conflicts(self, other):
+            if self.agent != other.agent:
+                return False
+            if self.edge and other.edge:
+                return self.edge == other.edge and self.time == other.time
+            return self.cell == other.cell and self.time == other.time
+
+    def __init__(self, grid, horizon):
+        self.grid = grid
+        self.rows, self.cols = grid.shape
+        self.H = horizon
+        self.lowlevel_cache = {}
+
+    # ---- low-level planner with constraints ----
+    def _plan(self, start, goal, constraints, aid):
+        key = (start, goal, tuple((c.cell, c.time, c.edge) for c in constraints if c.agent == aid))
+        if key in self.lowlevel_cache:
+            return self.lowlevel_cache[key]
+
+        def blocked(pos, t):
+            for c in constraints:
+                if c.agent == aid:
+                    if c.edge:
+                        continue
+                    if c.time == t and c.cell == pos:
+                        return True
+            return False
+
+        def blocked_edge(p, q, t):
+            for c in constraints:
+                if c.agent == aid and c.edge and c.time == t and c.edge == (p, q):
+                    return True
+            return False
+
+        pq = [(manhattan(start, goal), 0, start, 0, None)]
+        seen = {}
+
+        while pq:
+            f, g, pos, t, parent = heapq.heappop(pq)
+            if seen.get((pos, t), 1e9) <= g:
+                continue
+            seen[(pos, t)] = g
+            if pos == goal or t >= self.H:
+                path = []
+                node = (pos, t, parent)
+                while node:
+                    cell, tt, node = node
+                    path.append(cell)
+                path = list(reversed(path))
+                if len(path) < self.H + 1:
+                    path += [path[-1]] * (self.H + 1 - len(path))
+                self.lowlevel_cache[key] = path
+                return path
+            for d in MOVE_DIRS.values():
+                nxt = (pos[0] + d[0], pos[1] + d[1])
+                if not (0 <= nxt[0] < self.rows and 0 <= nxt[1] < self.cols):
+                    continue
+                if self.grid[nxt] == 1:
+                    continue
+                if blocked(nxt, t + 1) or blocked_edge(pos, nxt, t):
+                    continue
+                ng = g + 1
+                nf = ng + manhattan(nxt, goal)
+                heapq.heappush(pq, (nf, ng, nxt, t + 1, (pos, t, parent)))
+        return None  # no path
+
+    # ---- high-level CBS search ----
+    def find_solution(self, starts, goals):
+        n = len(starts)
+        root = {'paths': [], 'constraints': [], 'cost': 0}
+        for aid in range(n):
+            p = self._plan(starts[aid], goals[aid], [], aid)
+            if p is None:
+                return None
+            root['paths'].append(p)
+            root['cost'] += len(p)
+
+        open_set = [(root['cost'], 0, root)]
+        node_counter = 1
+
+        def first_conflict(paths):
+            T = len(paths[0])
+            for t in range(T):
+                pos_at_t = {}
+                for aid, path in enumerate(paths):
+                    cell = path[t] if t < len(path) else path[-1]
+                    if cell in pos_at_t:
+                        return (aid, pos_at_t[cell], cell, t, None)  # vertex
+                    pos_at_t[cell] = aid
+                for aid, path in enumerate(paths):
+                    if t == 0:
+                        continue
+                    prev = path[t - 1] if t - 1 < len(path) else path[-1]
+                    curr = path[t] if t < len(path) else path[-1]
+                    for bid, path2 in enumerate(paths):
+                        prev2 = path2[t - 1] if t - 1 < len(path2) else path2[-1]
+                        curr2 = path2[t] if t < len(path2) else path2[-1]
+                        if aid < bid and prev == curr2 and curr == prev2:
+                            return (aid, bid, (prev, curr), t - 1, (prev, curr2))  # edge swap
+            return None
+
+        while open_set and node_counter < MAX_CBS_NODES:
+            cost, _, node = heapq.heappop(open_set)
+            conflict = first_conflict(node['paths'])
+            if conflict is None:
+                return node['paths']  # found consistent
+            a1, a2, cell_or_edge, t, extra = conflict
+            for agent in (a1, a2):
+                new_constraints = list(node['constraints'])
+                if extra is None:  # vertex
+                    new_constraints.append(self.Constraint(agent, cell_or_edge, t + 1))
+                else:              # edge
+                    edge = (cell_or_edge[0], cell_or_edge[1])
+                    new_constraints.append(self.Constraint(agent, None, t, edge=edge))
+                new_paths = node['paths'].copy()
+                new_path = self._plan(starts[agent], goals[agent], new_constraints, agent)
+                if new_path is None:
+                    continue
+                new_paths[agent] = new_path
+                new_cost = sum(len(p) for p in new_paths)
+                new_node = {'paths': new_paths, 'constraints': new_constraints, 'cost': new_cost}
+                heapq.heappush(open_set, (new_cost, node_counter, new_node))
+                node_counter += 1
+        return None  # fallback failure
 
 
 # -------------------------------------------------------------------
@@ -183,17 +333,13 @@ def free_ratio(grid): return (grid == 0).sum() / grid.size
 # Main Agent class
 # -------------------------------------------------------------------
 class Agents:
-    # trade-off constants
-    N_PERMUTATIONS = 100      # multi-priority breadth
-    RANDOM_SEED = 42
-
     def __init__(self):
         self.grid = None
         self.t = 0
-        # planner config
+        # adaptive planner params
         self.H = 10
         self.RH = 30
-        self.planner = None
+        self.wpp = None
         # robots
         self.n = 0
         self.plan_q = {}
@@ -206,12 +352,12 @@ class Agents:
         self.pstatus = {}
         # parking
         self.parking_cells = []
+        # caches & flags
         self._dist_cache = {}
-        # misc
         self.plan_needed = True
-        random.seed(self.RANDOM_SEED)
+        random.seed(RANDOM_SEED)
 
-    # ------------- shortest path length (BFS + cache) -------------
+    # ------------- distance on static map (BFS cache) -------------
     def _path_len(self, a, b):
         if a == b:
             return 0
@@ -237,7 +383,7 @@ class Agents:
         self._dist_cache[key] = 9999
         return 9999
 
-    # ------------- parking spot discovery -------------
+    # ------------- parking discovery -------------
     def _degree(self, cell):
         r, c = cell
         deg = 0
@@ -253,7 +399,7 @@ class Agents:
         parking = [p for p in free if self._degree(p) <= 1]
         if len(parking) < self.n:
             parking += [p for p in free if self._degree(p) == 2 and p not in parking]
-        return parking or free  # fallback
+        return parking or free
 
     # ------------- package bookkeeping -------------
     def _update_packages(self, pkgs):
@@ -282,13 +428,12 @@ class Agents:
 
     def _assign_packages(self, rpos):
         waiting = [pid for pid, st in self.pstatus.items() if st == 'waiting']
-        free_ids = [r for r in range(self.n)
-                    if self.assigned[r] is None and self.carrying[r] is None]
-        if not waiting or not free_ids:
+        free = [r for r in range(self.n) if self.assigned[r] is None and self.carrying[r] is None]
+        if not waiting or not free:
             return
-        C = self._build_cost([rpos[r] for r in free_ids], waiting)
+        C = self._build_cost([rpos[r] for r in free], waiting)
         assign = hungarian(C)
-        for i, r in enumerate(free_ids):
+        for i, r in enumerate(free):
             j = assign[i]
             if j < len(waiting) and C[i, j] < 1e6:
                 pid = waiting[j]
@@ -296,13 +441,11 @@ class Agents:
                 self.pstatus[pid] = 'assigned'
                 self.plan_needed = True
 
-    # ------------- determine goals incl. parking -------------
+    # ------------- goal selection incl. parking -------------
     def _determine_goals(self, rpos):
         goals = [None] * self.n
         used = set()
         occupied = set(rpos)
-
-        # robots with tasks
         for r in range(self.n):
             if self.carrying[r] is not None:
                 goals[r] = self.pinfo[self.carrying[r]]['target']
@@ -310,72 +453,87 @@ class Agents:
                 goals[r] = self.pinfo[self.assigned[r]]['start']
             if goals[r] is not None:
                 used.add(goals[r])
-
-        # idle robots → nearest free parking cell
         for r in range(self.n):
             if goals[r] is not None:
                 continue
-            best_p, best_d = None, 1e9
+            best, bestd = None, 1e9
             for p in self.parking_cells:
                 if p in used or p in occupied:
                     continue
                 d = self._path_len(rpos[r], p)
-                if d < best_d:
-                    best_p, best_d = p, d
-            goals[r] = best_p if best_p is not None else rpos[r]
+                if d < bestd:
+                    best, bestd = p, d
+            goals[r] = best if best else rpos[r]
             used.add(goals[r])
         return goals
 
-    # ------------- plan scoring -------------
+    # ------------- score joint paths -------------
     def _score_paths(self, paths):
         sc = 0
         for rid, path in enumerate(paths):
             sc += len(path)
-            pid = (self.carrying[rid] if self.carrying[rid] is not None
-                   else self.assigned[rid])
+            pid = self.carrying[rid] if self.carrying[rid] else self.assigned[rid]
             if pid:
                 info = self.pinfo[pid]
-                dist_left = self._path_len(path[-1], info['target'])
-                finish = self.t + len(path) + dist_left
+                finish = self.t + len(path) + self._path_len(path[-1], info['target'])
                 late = max(0, finish - info['deadline'])
-                sc += 10 * late
+                sc += late * 10
         return sc
 
-    # ------------- multi-priority planning -------------
-    def _plan_paths(self, rpos):
-        goals = self._determine_goals(rpos)
-        best_paths = self.planner.plan_all(rpos, goals)
+    # ------------- WPP + permutations -------------
+    def _wpp_plan(self, rpos, goals):
+        best_paths = self.wpp.plan_all(rpos, goals)
         best_sc = self._score_paths(best_paths)
-
         ids = list(range(self.n))
-        for _ in range(self.N_PERMUTATIONS):
+        for _ in range(N_PERMUTATIONS):
             random.shuffle(ids)
-            paths = self.planner.plan_all(rpos, goals, order=ids)
+            paths = self.wpp.plan_all(rpos, goals, order=ids)
             sc = self._score_paths(paths)
             if sc < best_sc:
                 best_paths, best_sc = paths, sc
+        return best_paths, best_sc
 
+    # ------------- CBS fallback -------------
+    def _cbs_plan(self, rpos, goals):
+        cbs = CBS(self.grid, CBS_HORIZON)
+        sol = cbs.find_solution(rpos, goals)
+        return sol
+
+    # ------------- convert joint path → deque of moves -------------
+    def _paths_to_queues(self, paths):
         for r in range(self.n):
             moves = []
-            for k in range(1, len(best_paths[r])):
-                d = (best_paths[r][k][0] - best_paths[r][k - 1][0],
-                     best_paths[r][k][1] - best_paths[r][k - 1][1])
+            for k in range(1, len(paths[r])):
+                d = (paths[r][k][0] - paths[r][k - 1][0],
+                     paths[r][k][1] - paths[r][k - 1][1])
                 moves.append(DELTA_TO_MOVE.get(d, 'S'))
             self.plan_q[r] = deque(moves or ['S'])
+
+    # ------------- planning wrapper -------------
+    def _plan_paths(self, rpos):
+        goals = self._determine_goals(rpos)
+        paths, sc = self._wpp_plan(rpos, goals)
+
+        lb = sum(self._path_len(rpos[i], goals[i]) for i in range(self.n))
+        if sc > lb * CBS_THRESHOLD_FACTOR:
+            cbs_paths = self._cbs_plan(rpos, goals)
+            if cbs_paths:
+                paths = cbs_paths
+        self._paths_to_queues(paths)
 
     # ------------- simulator hooks -------------
     def init_agents(self, state):
         self.n = len(state['robots'])
         self.grid = np.array(state['map'], int)
-
-        # adaptive horizons
         corr = longest_corridor(self.grid)
         ratio = free_ratio(self.grid)
-        self.H = min(40, corr * 2) if corr >= 10 or ratio < 0.4 else max(5, corr + 2)
+        # longer look-ahead on tight maps
+        if corr >= 10 or ratio < 0.4:
+            self.H = min(60, corr * 3)
+        else:
+            self.H = max(8, corr + 3)
         self.RH = self.H * 3
-        self.planner = AWPPlanner(self.grid, self.H, self.RH)
-
-        # parking discovery
+        self.wpp = WPP(self.grid, self.H, self.RH)
         self.parking_cells = self._find_parking_cells()
 
         for r in range(self.n):
@@ -387,34 +545,33 @@ class Agents:
         self.t = state['time_step']
         self._update_packages(state['packages'])
 
-        # --- parse robot state ---
+        # ---- robot state ----
         rpos = []
         for r, (row, col, carry) in enumerate(state['robots']):
             pos = (row - 1, col - 1)
             rpos.append(pos)
             self.stationary[r] = (self.stationary[r] + 1
-                                   if pos == self.prev_pos.get(r) else 0)
+                                  if pos == self.prev_pos.get(r) else 0)
             self.prev_pos[r] = pos
-
             if carry:
                 self.carrying[r] = carry
             elif self.carrying[r]:
                 self.pstatus[self.carrying[r]] = 'done'
                 self.carrying[r] = None
 
-        # --- new jobs & stalls ---
+        # ---- assignments & stalls ----
         self._assign_packages(rpos)
         if any(self.stationary[r] >= self.H for r in range(self.n)):
             self.plan_needed = True
             for r in range(self.n):
                 self.stationary[r] = 0
 
-        # --- planning ---
+        # ---- plan when needed ----
         if self.plan_needed or any(len(self.plan_q[r]) == 0 for r in range(self.n)):
             self._plan_paths(rpos)
             self.plan_needed = False
 
-        # --- actions ---
+        # ---- emit actions ----
         actions = []
         for r in range(self.n):
             move = self.plan_q[r].popleft() if self.plan_q[r] else 'S'
@@ -422,7 +579,7 @@ class Agents:
             nxt = (rpos[r][0] + dr, rpos[r][1] + dc)
             pkg_act = '0'
 
-            # pick
+            # pick-up
             if self.carrying[r] is None and self.assigned[r] is not None:
                 pid = self.assigned[r]
                 if nxt == self.pinfo[pid]['start']:
@@ -431,8 +588,7 @@ class Agents:
                     self.pstatus[pid] = 'carrying'
                     self.assigned[r] = None
                     self.plan_needed = True
-
-            # drop
+            # drop-off
             if self.carrying[r] is not None:
                 pid = self.carrying[r]
                 if nxt == self.pinfo[pid]['target']:
@@ -442,5 +598,4 @@ class Agents:
                     self.plan_needed = True
 
             actions.append((move, pkg_act))
-
         return actions
