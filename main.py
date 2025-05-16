@@ -32,7 +32,7 @@ if __name__=="__main__":
         actions = agents.get_actions(state)
         next_state, reward, done, infos = env.step(actions)
         state = next_state
-        env.render()
+        #env.render()
         t += 1
 
     print("Episode finished")
