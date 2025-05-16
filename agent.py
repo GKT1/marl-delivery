@@ -26,7 +26,7 @@ Tune constants at the top for speed / quality.
 # -------------------------------------------------------------------
 # Tunable constants
 # -------------------------------------------------------------------
-N_PERMUTATIONS      = 100    # WPP priority samples
+N_PERMUTATIONS      = 10000    # WPP priority samples
 CBS_HORIZON         = 60      # joint-plan depth for CBS
 CBS_THRESHOLD_FACTOR = 1.5    # when to trigger CBS ( > LB×factor )
 MAX_CBS_NODES       = 20000   # hard cap on CBS high-level nodes
