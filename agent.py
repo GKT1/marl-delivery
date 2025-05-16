@@ -199,7 +199,7 @@ class Agents:
         self._dist_cache = {}
         # misc
         self.plan_needed = True
-        random.seed(self.RANDOM_SEED
+        random.seed(self.RANDOM_SEED)
 
     # ------------- shortest-path length (BFS + cache) -------------
     def _path_len(self, a, b):
