@@ -199,41 +199,7 @@ class Agents:
         self._dist_cache = {}
         # misc
         self.plan_needed = True
-        random.seed(self.RANDOM_SEED)
-
-    # ================================================================
-    # 2-lane special-case helpers
-    # ================================================================
-    def _carve_border_for_two_lane_loop(self):
-        """
-        If we detect a 2-cell-wide corridor hugging the inner border
-        but blocked by the outermost wall, carve the matching border
-        cells so the road becomes a closed ring.
-
-        This is intentionally conservative: we only alter a border cell
-        when the two immediately inner cells are already free (0 0 1 →
-        0 0 0).  That way we avoid damaging unrelated maps.
-        """
-        g = self.grid
-        H, W = g.shape
-
-        # --- top & bottom ------------------------------------------------
-        for col in range(1, W - 1):
-            # top border
-            if g[0, col] == 1 and g[1, col] == 0 and g[2, col] == 0:
-                g[0, col] = 0
-            # bottom border
-            if g[H - 1, col] == 1 and g[H - 2, col] == 0 and g[H - 3, col] == 0:
-                g[H - 1, col] = 0
-
-        # --- left & right -------------------------------------------------
-        for row in range(1, H - 1):
-            # left border
-            if g[row, 0] == 1 and g[row, 1] == 0 and g[row, 2] == 0:
-                g[row, 0] = 0
-            # right border
-            if g[row, W - 1] == 1 and g[row, W - 2] == 0 and g[row, W - 3] == 0:
-                g[row, W - 1] = 0
+        random.seed(self.RANDOM_SEED
 
     # ------------- shortest-path length (BFS + cache) -------------
     def _path_len(self, a, b):
@@ -393,10 +359,6 @@ class Agents:
     def init_agents(self, state):
         self.n = len(state['robots'])
         self.grid = np.array(state['map'], int)
-
-        # ---- SPECIAL-CASE 2-LANE LOOP ---------------------------------
-        # Try to close the loop if necessary *before* we analyse corridors.
-        self._carve_border_for_two_lane_loop()
 
         # adaptive horizons
         corr = longest_corridor(self.grid)
