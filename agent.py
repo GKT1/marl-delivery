@@ -184,7 +184,7 @@ def free_ratio(grid): return (grid == 0).sum() / grid.size
 # -------------------------------------------------------------------
 class Agents:
     # trade-off constants
-    N_PERMUTATIONS = 500      # multi-priority breadth
+    N_PERMUTATIONS = 100      # multi-priority breadth
     RANDOM_SEED = 42
 
     def __init__(self):
