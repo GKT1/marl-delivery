@@ -1,601 +1,380 @@
-import heapq
-import random
+import heapq, random, numpy as np
 from collections import defaultdict, deque
-import numpy as np
+import matplotlib.pyplot as plt
+try:
+    import imageio.v2 as imageio
+except ImportError:
+    imageio = None
 
-"""====================================================================
-Adaptive multi-robot agent – v7-cbs
-----------------------------------
-Adds an **on-demand Conflict-Based Search (CBS)** fallback:
+# =========================================================
+#                    Visualizer
+# =========================================================
+class Visualizer:
+    COLORS = ['tab:blue','tab:orange','tab:green','tab:red','tab:purple',
+              'tab:brown','tab:pink','tab:gray','tab:olive','tab:cyan']
+    def __init__(self, grid):
+        self.grid = np.array(grid)
+        self.frames=[]; self.fig,self.ax = plt.subplots()
+        self.ax.set_aspect('equal'); self.ax.axis('off')
+    def _draw(self, robots, pkgs):
+        self.ax.clear(); self.ax.axis('off')
+        oy,ox = np.where(self.grid==1)
+        self.ax.scatter(ox,-oy,s=60,c='k',marker='s')
+        for pid,sr,sc,_,_,_,_ in pkgs:
+            self.ax.scatter(sc-1,-(sr-1),s=40,c='orange',marker='s')
+        for rid,(r,c,carry) in enumerate(robots):
+            col=self.COLORS[rid%len(self.COLORS)]
+            self.ax.scatter(c-1,-(r-1),s=120,c=col,marker='o',edgecolors='k')
+            if carry:
+                self.ax.scatter(c-1,-(r-1),s=40,c='yellow',marker='s',edgecolors='k')
+        self.ax.set_xlim(-.5,self.grid.shape[1]-.5)
+        self.ax.set_ylim(-self.grid.shape[0]+.5,.5)
+        self.fig.canvas.draw()
+        self.frames.append(np.asarray(self.fig.canvas.buffer_rgba()))
+    def step(self, robots, pkgs): self._draw(robots, pkgs); plt.pause(0.001)
+    def save_gif(self, path='run.gif', fps=4):
+        if imageio is None:
+            print("Install imageio for GIF export"); return
+        imageio.mimsave(path, self.frames, fps=fps)
 
-⊳  Run WPP with N permutations (default 3 000).
-⊳  If its best score  >  LB × 1.5   (LB = sum shortest paths) →
-    invoke CBS with a 60-step horizon to find an optimal joint plan.
-⊳  CBS prunes when node count > MAX_CBS_NODES (default 20 000)
-    to keep runtime finite.
+# =========================================================
+#             Constants & small helpers
+# =========================================================
+MOVE_DIRS={'S':(0,0),'L':(0,-1),'R':(0,1),'U':(-1,0),'D':(1,0)}
+DELTA2MOVE={v:k for k,v in MOVE_DIRS.items()}
+def manh(a,b): return abs(a[0]-b[0])+abs(a[1]-b[1])
 
-Keeps:
-• Parking for idle robots (dead-end & side-cell spots).
-• True-distance Hungarian assignment.
-• Adaptive horizons & stall detector.
+N_PERM=1000         # permutations each tick
+CBS_H=60            # CBS horizon
+THRESH=1.6          # score / lower-bound that triggers CBS
+MAX_CBS=20000       # CBS node cap
+random.seed(42)
 
-Tune constants at the top for speed / quality.
-===================================================================="""
-
-
-# -------------------------------------------------------------------
-# Tunable constants
-# -------------------------------------------------------------------
-N_PERMUTATIONS      = 10000    # WPP priority samples
-CBS_HORIZON         = 60      # joint-plan depth for CBS
-CBS_THRESHOLD_FACTOR = 1.5    # when to trigger CBS ( > LB×factor )
-MAX_CBS_NODES       = 20000   # hard cap on CBS high-level nodes
-RANDOM_SEED         = 42
-
-
-# -------------------------------------------------------------------
-# Geometry helpers
-# -------------------------------------------------------------------
-MOVE_DIRS = {
-    'S': (0, 0),
-    'L': (0, -1),
-    'R': (0, 1),
-    'U': (-1, 0),
-    'D': (1, 0)
-}
-DELTA_TO_MOVE = {v: k for k, v in MOVE_DIRS.items()}
-
-
-def manhattan(a, b):
-    return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
-
-# -------------------------------------------------------------------
-# Hungarian solver (square-pad, n ≤ 20)
-# -------------------------------------------------------------------
-def hungarian(cost_matrix):
-    cost = np.array(cost_matrix, float).copy()
-    n = cost.shape[0]
-    cost -= cost.min(axis=1)[:, None]
-    cost -= cost.min(axis=0)[None, :]
-    star = np.zeros_like(cost, bool)
-    row_cov = np.zeros(n, bool)
-    col_cov = np.zeros(n, bool)
-
-    rows, cols = np.where(cost == 0)
-    for r, c in zip(rows, cols):
-        if not row_cov[r] and not col_cov[c]:
-            star[r, c] = True
-            row_cov[r] = col_cov[c] = True
-    row_cov[:] = col_cov[:] = False
-
-    def cover_cols(): col_cov[:] = star.any(axis=0)
-    cover_cols()
-    prime = np.zeros_like(cost, bool)
-
-    while col_cov.sum() < n:
-        z_rows, z_cols = np.where((cost == 0) & (~row_cov)[:, None] & (~col_cov)[None, :])
-        if z_rows.size == 0:
-            m = cost[(~row_cov)[:, None] & (~col_cov)[None, :]].min()
-            cost[~row_cov, :] -= m
-            cost[:, col_cov] += m
-            continue
-        r, c = z_rows[0], z_cols[0]
-        prime[r, c] = True
-        s_col = np.where(star[r])[0]
-        if s_col.size == 0:
-            path = [(r, c)]
+# =========================================================
+#         Minimal Hungarian (unchanged)
+# =========================================================
+def hungarian(c):
+    c=np.array(c,float); n=c.shape[0]
+    c-=c.min(1)[:,None]; c-=c.min(0)
+    star=np.zeros_like(c,bool); row=np.zeros(n,bool); col=np.zeros(n,bool)
+    r0,c0=np.where(c==0)
+    for r,k in zip(r0,c0):
+        if not row[r] and not col[k]:
+            star[r,k]=row[r]=col[k]=True
+    row[:]=col[:]=False
+    def cover(): col[:] = star.any(0)
+    cover(); prime=np.zeros_like(c,bool)
+    while col.sum()<n:
+        zR,zC=np.where((c==0)&(~row)[:,None]&(~col)[None,:])
+        if zR.size==0:
+            m=c[(~row)[:,None]&(~col)[None,:]].min()
+            c[~row]-=m; c[:,col]+=m; continue
+        r,k=zR[0],zC[0]; prime[r,k]=True
+        s=np.where(star[r])[0]
+        if s.size==0:
+            path=[(r,k)]
             while True:
-                r_star = np.where(star[:, path[-1][1]])[0]
-                if r_star.size == 0:
-                    break
-                r2 = r_star[0]
-                c2 = np.where(prime[r2])[0][0]
-                path += [(r2, path[-1][1]), (r2, c2)]
-            for pr, pc in path:
-                star[pr, pc] = not star[pr, pc]
-            prime[:] = row_cov[:] = col_cov[:] = False
-            cover_cols()
+                rs=np.where(star[:,path[-1][1]])[0]
+                if rs.size==0: break
+                r2=rs[0]; k2=np.where(prime[r2])[0][0]
+                path+=[(r2,path[-1][1]),(r2,k2)]
+            for pr,pc in path: star[pr,pc]=~star[pr,pc]
+            prime[:]=row[:]=col[:]=False; cover()
         else:
-            row_cov[r] = True
-            col_cov[s_col[0]] = False
+            row[r]=True; col[s[0]]=False
+    out=[-1]*n
+    for r,k in zip(*np.where(star)): out[r]=k
+    return out
 
-    assign = [-1] * n
-    for r, c in zip(*np.where(star)):
-        assign[r] = c
-    return assign
-
-
-# -------------------------------------------------------------------
-# Windowed Prioritised Planner
-# -------------------------------------------------------------------
+# =========================================================
+#       Windowed Prioritised Planner  (WPP)
+# =========================================================
 class WPP:
     def __init__(self, grid, H, RH):
-        self.grid = grid
+        self.grid, self.H, self.RH = grid, H, RH
         self.rows, self.cols = grid.shape
-        self.H  = H     # planning horizon
-        self.RH = RH    # reservation horizon
-
-    def in_bounds(self, p): return 0 <= p[0] < self.rows and 0 <= p[1] < self.cols
-    def passable(self, p): return self.grid[p] == 0
-
-    def neighbors(self, pos):
+    def inb(self,p): return 0<=p[0]<self.rows and 0<=p[1]<self.cols
+    def free(self,p): return self.grid[p]==0
+    def nbrs(self,p):
         for d in MOVE_DIRS.values():
-            nxt = (pos[0] + d[0], pos[1] + d[1])
-            if self.in_bounds(nxt) and self.passable(nxt):
-                yield nxt
-
-    # --- joint plan respecting a given robot order ---
-    def plan_all(self, starts, goals, order=None):
-        n = len(starts)
-        order = list(order) if order is not None else list(range(n))
-        paths = [[] for _ in range(n)]
-        res_v, res_e = defaultdict(set), defaultdict(set)
-
-        for rid in order:
-            path = self._a_star(starts[rid], goals[rid], res_v, res_e)
-            if len(path) < self.H + 1:
-                path += [path[-1]] * (self.H + 1 - len(path))
-            paths[rid] = path
-            for t in range(min(self.RH, len(path))):
-                res_v[t].add(path[t])
-                if t > 0:
-                    res_e[t - 1].add((path[t - 1], path[t]))
+            q=(p[0]+d[0],p[1]+d[1])
+            if self.inb(q) and self.free(q): yield q
+    def _astar(self,s,g,resV,resE):
+        if s==g: return [s]
+        pq=[(manh(s,g),0,s,0,None)]; best={}
+        while pq:
+            f,gc,pos,t,parent=heapq.heappop(pq)
+            if best.get((pos,t),1e9)<=gc: continue
+            best[(pos,t)]=gc
+            if pos==g or t>=self.H:
+                path=[]; node=(pos,t,parent)
+                while node:
+                    cell,tt,node=node; path.append(cell)
+                path.reverse()
+                if len(path)<self.H+1:
+                    path+=[path[-1]]*(self.H+1-len(path))
+                return path
+            for q in self.nbrs(pos):
+                if (t+1) in resV and q in resV[t+1]: continue
+                if t in resE and (pos,q) in resE[t]: continue
+                ng=gc+1; nf=ng+manh(q,g)
+                heapq.heappush(pq,(nf,ng,q,t+1,(pos,t,parent)))
+        return [s]
+    def plan(self,starts,goals,order=None):
+        n=len(starts); order=list(order) if order else list(range(n))
+        paths=[[]]*n; resV,resE=defaultdict(set),defaultdict(set)
+        for aid in order:
+            p=self._astar(starts[aid],goals[aid],resV,resE)
+            paths[aid]=p
+            for t in range(min(self.RH,len(p))):
+                resV[t].add(p[t])
+                if t: resE[t-1].add((p[t-1],p[t]))
         return paths
 
-    def _a_star(self, start, goal, res_v, res_e):
-        if start == goal:
-            return [start]
-        pq = [(manhattan(start, goal), 0, start, 0, None)]
-        best = {}
-        while pq:
-            f, g, pos, t, parent = heapq.heappop(pq)
-            if best.get((pos, t), 1e9) <= g:
-                continue
-            best[(pos, t)] = g
-            if pos == goal or t >= self.H:
-                return self._reconstruct((pos, t, parent))
-            for nxt in self.neighbors(pos):
-                if (t + 1) in res_v and nxt in res_v[t + 1]:
-                    continue
-                if t in res_e and (pos, nxt) in res_e[t]:
-                    continue
-                ng = g + 1
-                nf = ng + manhattan(nxt, goal)
-                heapq.heappush(pq, (nf, ng, nxt, t + 1, (pos, t, parent)))
-        return [start]
-
-    @staticmethod
-    def _reconstruct(node):
-        path = []
-        while node:
-            pos, t, node = node
-            path.append(pos)
-        return list(reversed(path))
-
-
-# -------------------------------------------------------------------
-# Conflict-Based Search (optimises joint plan for fixed horizon)
-# -------------------------------------------------------------------
+# =========================================================
+#              Conflict-Based Search  (CBS)
+# =========================================================
 class CBS:
-    class Constraint:
+    class C:
         def __init__(self, agent, cell, time, edge=None):
-            self.agent, self.cell, self.time, self.edge = agent, cell, time, edge  # edge = (from,to)
-
-        def conflicts(self, other):
-            if self.agent != other.agent:
-                return False
-            if self.edge and other.edge:
-                return self.edge == other.edge and self.time == other.time
-            return self.cell == other.cell and self.time == other.time
-
-    def __init__(self, grid, horizon):
-        self.grid = grid
+            self.a, self.cell, self.t, self.edge = agent, cell, time, edge
+    def __init__(self, grid, H):
+        self.grid, self.H = grid, H
         self.rows, self.cols = grid.shape
-        self.H = horizon
-        self.lowlevel_cache = {}
-
-    # ---- low-level planner with constraints ----
-    def _plan(self, start, goal, constraints, aid):
-        key = (start, goal, tuple((c.cell, c.time, c.edge) for c in constraints if c.agent == aid))
-        if key in self.lowlevel_cache:
-            return self.lowlevel_cache[key]
-
-        def blocked(pos, t):
-            for c in constraints:
-                if c.agent == aid:
-                    if c.edge:
-                        continue
-                    if c.time == t and c.cell == pos:
-                        return True
-            return False
-
-        def blocked_edge(p, q, t):
-            for c in constraints:
-                if c.agent == aid and c.edge and c.time == t and c.edge == (p, q):
-                    return True
-            return False
-
-        pq = [(manhattan(start, goal), 0, start, 0, None)]
-        seen = {}
-
+        self.cache={}
+    def inb(self,p): return 0<=p[0]<self.rows and 0<=p[1]<self.cols
+    def free(self,p): return self.grid[p]==0
+    def nbrs(self,p):
+        for d in MOVE_DIRS.values():
+            q=(p[0]+d[0],p[1]+d[1])
+            if self.inb(q) and self.free(q): yield q
+    # low-level
+    def _plan(self,s,g,cons,aid):
+        key=(s,g,tuple((c.cell,c.t,c.edge) for c in cons if c.a==aid))
+        if key in self.cache: return self.cache[key]
+        def blocked(pos,t):
+            return any(c.a==aid and not c.edge and c.t==t and c.cell==pos for c in cons)
+        def blockedE(p,q,t):
+            return any(c.a==aid and c.edge and c.t==t and c.edge==(p,q) for c in cons)
+        pq=[(manh(s,g),0,s,0,None)]; best={}
         while pq:
-            f, g, pos, t, parent = heapq.heappop(pq)
-            if seen.get((pos, t), 1e9) <= g:
-                continue
-            seen[(pos, t)] = g
-            if pos == goal or t >= self.H:
-                path = []
-                node = (pos, t, parent)
+            f,gc,pos,t,parent=heapq.heappop(pq)
+            if best.get((pos,t),1e9)<=gc: continue
+            best[(pos,t)]=gc
+            if pos==g or t>=self.H:
+                path=[]; node=(pos,t,parent)
                 while node:
-                    cell, tt, node = node
-                    path.append(cell)
-                path = list(reversed(path))
-                if len(path) < self.H + 1:
-                    path += [path[-1]] * (self.H + 1 - len(path))
-                self.lowlevel_cache[key] = path
-                return path
-            for d in MOVE_DIRS.values():
-                nxt = (pos[0] + d[0], pos[1] + d[1])
-                if not (0 <= nxt[0] < self.rows and 0 <= nxt[1] < self.cols):
-                    continue
-                if self.grid[nxt] == 1:
-                    continue
-                if blocked(nxt, t + 1) or blocked_edge(pos, nxt, t):
-                    continue
-                ng = g + 1
-                nf = ng + manhattan(nxt, goal)
-                heapq.heappush(pq, (nf, ng, nxt, t + 1, (pos, t, parent)))
-        return None  # no path
-
-    # ---- high-level CBS search ----
-    def find_solution(self, starts, goals):
-        n = len(starts)
-        root = {'paths': [], 'constraints': [], 'cost': 0}
+                    cell,tt,node=node; path.append(cell)
+                path.reverse()
+                if len(path)<self.H+1:
+                    path+=[path[-1]]*(self.H+1-len(path))
+                self.cache[key]=path; return path
+            for q in self.nbrs(pos):
+                if blocked(q,t+1) or blockedE(pos,q,t): continue
+                ng=gc+1; nf=ng+manh(q,g)
+                heapq.heappush(pq,(nf,ng,q,t+1,(pos,t,parent)))
+        return None
+    # conflict detection
+    def _conflict(self,paths):
+        T=len(paths[0])
+        for t in range(T):
+            occ={}
+            for a,p in enumerate(paths):
+                cell=p[t] if t<len(p) else p[-1]
+                if cell in occ: return ('vert',a,occ[cell],cell,t)
+                occ[cell]=a
+            for a,p in enumerate(paths):
+                if t==0: continue
+                prev,cur=p[t-1] if t-1<len(p) else p[-1], p[t] if t<len(p) else p[-1]
+                for b,p2 in enumerate(paths):
+                    prev2,cur2=p2[t-1] if t-1<len(p2) else p2[-1], p2[t] if t<len(p2) else p2[-1]
+                    if a<b and prev==cur2 and cur==prev2:
+                        return ('edge',a,b,(prev,cur),t-1)
+        return None
+    # high-level search
+    def solve(self,starts,goals,max_nodes=MAX_CBS):
+        n=len(starts)
+        root={'cons':[], 'paths':[], 'cost':0}
         for aid in range(n):
-            p = self._plan(starts[aid], goals[aid], [], aid)
-            if p is None:
-                return None
-            root['paths'].append(p)
-            root['cost'] += len(p)
-
-        open_set = [(root['cost'], 0, root)]
-        node_counter = 1
-
-        def first_conflict(paths):
-            T = len(paths[0])
-            for t in range(T):
-                pos_at_t = {}
-                for aid, path in enumerate(paths):
-                    cell = path[t] if t < len(path) else path[-1]
-                    if cell in pos_at_t:
-                        return (aid, pos_at_t[cell], cell, t, None)  # vertex
-                    pos_at_t[cell] = aid
-                for aid, path in enumerate(paths):
-                    if t == 0:
-                        continue
-                    prev = path[t - 1] if t - 1 < len(path) else path[-1]
-                    curr = path[t] if t < len(path) else path[-1]
-                    for bid, path2 in enumerate(paths):
-                        prev2 = path2[t - 1] if t - 1 < len(path2) else path2[-1]
-                        curr2 = path2[t] if t < len(path2) else path2[-1]
-                        if aid < bid and prev == curr2 and curr == prev2:
-                            return (aid, bid, (prev, curr), t - 1, (prev, curr2))  # edge swap
-            return None
-
-        while open_set and node_counter < MAX_CBS_NODES:
-            cost, _, node = heapq.heappop(open_set)
-            conflict = first_conflict(node['paths'])
-            if conflict is None:
-                return node['paths']  # found consistent
-            a1, a2, cell_or_edge, t, extra = conflict
-            for agent in (a1, a2):
-                new_constraints = list(node['constraints'])
-                if extra is None:  # vertex
-                    new_constraints.append(self.Constraint(agent, cell_or_edge, t + 1))
-                else:              # edge
-                    edge = (cell_or_edge[0], cell_or_edge[1])
-                    new_constraints.append(self.Constraint(agent, None, t, edge=edge))
-                new_paths = node['paths'].copy()
-                new_path = self._plan(starts[agent], goals[agent], new_constraints, agent)
-                if new_path is None:
-                    continue
-                new_paths[agent] = new_path
-                new_cost = sum(len(p) for p in new_paths)
-                new_node = {'paths': new_paths, 'constraints': new_constraints, 'cost': new_cost}
-                heapq.heappush(open_set, (new_cost, node_counter, new_node))
-                node_counter += 1
-        return None  # fallback failure
-
-
-# -------------------------------------------------------------------
-# Static map metrics
-# -------------------------------------------------------------------
-def longest_corridor(grid):
-    best = 1
-    for axis in [0, 1]:
-        for idx in range(grid.shape[axis]):
-            cnt = 0
-            for jdx in range(grid.shape[1 - axis]):
-                r, c = (idx, jdx) if axis == 0 else (jdx, idx)
-                if grid[r, c] == 0:
-                    cnt += 1
-                    best = max(best, cnt)
+            p=self._plan(starts[aid],goals[aid],[],aid)
+            if p is None: return None
+            root['paths'].append(p); root['cost']+=len(p)
+        open=[(root['cost'],0,root)]; nid=1
+        while open and nid<max_nodes:
+            cost,_,node=heapq.heappop(open)
+            confl=self._conflict(node['paths'])
+            if confl is None: return node['paths']
+            typ,a1,a2,data,t=confl
+            for ag in (a1,a2):
+                cons=list(node['cons'])
+                if typ=='vert':
+                    cons.append(self.C(ag,data,t+1))
                 else:
-                    cnt = 0
-    return best
+                    cons.append(self.C(ag,None,t,edge=data))
+                paths=node['paths'].copy()
+                newp=self._plan(starts[ag],goals[ag],cons,ag)
+                if newp is None: continue
+                paths[ag]=newp
+                newcost=sum(len(p) for p in paths)
+                heapq.heappush(open,(newcost,nid,{'cons':cons,'paths':paths,'cost':newcost}))
+                nid+=1
+        return None
 
-
-def free_ratio(grid): return (grid == 0).sum() / grid.size
-
-
-# -------------------------------------------------------------------
-# Main Agent class
-# -------------------------------------------------------------------
+# =========================================================
+#                       Agents
+# =========================================================
 class Agents:
     def __init__(self):
-        self.grid = None
-        self.t = 0
-        # adaptive planner params
-        self.H = 10
-        self.RH = 30
-        self.wpp = None
-        # robots
-        self.n = 0
-        self.plan_q = {}
-        self.assigned = {}
-        self.carrying = {}
-        self.stationary = {}
-        self.prev_pos = {}
-        # packages
-        self.pinfo = {}
-        self.pstatus = {}
-        # parking
-        self.parking_cells = []
-        # caches & flags
-        self._dist_cache = {}
-        self.plan_needed = True
-        random.seed(RANDOM_SEED)
-
-    # ------------- distance on static map (BFS cache) -------------
-    def _path_len(self, a, b):
-        if a == b:
-            return 0
-        key = (a, b)
-        if key in self._dist_cache:
-            return self._dist_cache[key]
-        R, C = self.grid.shape
-        q = deque([(a, 0)])
-        seen = {a}
-        while q:
-            pos, d = q.popleft()
-            for delta in MOVE_DIRS.values():
-                nxt = (pos[0] + delta[0], pos[1] + delta[1])
-                if not (0 <= nxt[0] < R and 0 <= nxt[1] < C):
-                    continue
-                if self.grid[nxt] or nxt in seen:
-                    continue
-                if nxt == b:
-                    self._dist_cache[key] = d + 1
-                    return d + 1
-                seen.add(nxt)
-                q.append((nxt, d + 1))
-        self._dist_cache[key] = 9999
-        return 9999
-
-    # ------------- parking discovery -------------
-    def _degree(self, cell):
-        r, c = cell
-        deg = 0
-        for d in MOVE_DIRS.values():
-            nr, nc = r + d[0], c + d[1]
-            if 0 <= nr < self.grid.shape[0] and 0 <= nc < self.grid.shape[1]:
-                if self.grid[nr, nc] == 0:
-                    deg += 1
-        return deg
-
-    def _find_parking_cells(self):
-        free = list(zip(*np.where(self.grid == 0)))
-        parking = [p for p in free if self._degree(p) <= 1]
-        if len(parking) < self.n:
-            parking += [p for p in free if self._degree(p) == 2 and p not in parking]
-        return parking or free
-
-    # ------------- package bookkeeping -------------
-    def _update_packages(self, pkgs):
-        for pkg in pkgs:
-            pid, sr, sc, tr, tc, _, dl = pkg
+        self.grid=None; self.n=0
+        self.H=20; self.RH=60; self.wpp=None; self.viz=None
+        self.plan_q={}; self.assigned={}; self.carrying={}
+        self.pinfo={}; self.pstatus={}
+        self.dist_cache={}
+    # BFS distance
+    def dist(self,a,b):
+        if a==b: return 0
+        key=(a,b)
+        if key in self.dist_cache: return self.dist_cache[key]
+        R,C=self.grid.shape; dq=deque([(a,0)]); seen={a}
+        while dq:
+            pos,d=dq.popleft()
+            for dt in MOVE_DIRS.values():
+                q=(pos[0]+dt[0],pos[1]+dt[1])
+                if not (0<=q[0]<R and 0<=q[1]<C): continue
+                if self.grid[q] or q in seen: continue
+                if q==b:
+                    self.dist_cache[key]=d+1; return d+1
+                seen.add(q); dq.append((q,d+1))
+        self.dist_cache[key]=9999; return 9999
+    # parking discovery
+    def deg(self,c):
+        r,c0=c; d=0
+        for dt in MOVE_DIRS.values():
+            nr,nc=r+dt[0],c0+dt[1]
+            if 0<=nr<self.grid.shape[0] and 0<=nc<self.grid.shape[1]:
+                if self.grid[nr,nc]==0: d+=1
+        return d
+    def parks(self):
+        free=list(zip(*np.where(self.grid==0)))
+        pk=[p for p in free if self.deg(p)<=1]
+        if len(pk)<self.n: pk+=[p for p in free if self.deg(p)==2 and p not in pk]
+        return pk or free
+    # init
+    def init_agents(self,state):
+        self.grid=np.array(state['map'],int); self.n=len(state['robots'])
+        corr=max((self.grid[i]==0).sum() for i in range(self.grid.shape[0]))
+        self.H=min(60,corr*3) if corr>=10 else 20; self.RH=self.H*3
+        self.wpp=WPP(self.grid,self.H,self.RH); self.parking=self.parks()
+        for r in range(self.n):
+            self.plan_q[r]=deque(); self.assigned[r]=self.carrying[r]=None
+        self.viz=Visualizer(state['map'])
+    # pkg bookkeeping
+    def upd_pkgs(self,pkgs):
+        for pid,sr,sc,tr,tc,_,dl in pkgs:
             if pid not in self.pinfo:
-                self.pinfo[pid] = {'start': (sr - 1, sc - 1),
-                                   'target': (tr - 1, tc - 1),
-                                   'deadline': dl}
-                self.pstatus[pid] = 'waiting'
-
-    # ------------- Hungarian assignment -------------
-    def _build_cost(self, rpos, waiting):
-        m, n = len(rpos), len(waiting)
-        size = max(m, n)
-        C = np.full((size, size), 1e6)
-        for i, pos in enumerate(rpos):
-            for j, pid in enumerate(waiting):
-                info = self.pinfo[pid]
-                d1 = self._path_len(pos, info['start'])
-                d2 = self._path_len(info['start'], info['target'])
-                total = d1 + d2
-                slack = info['deadline'] - (self.t + total)
-                C[i, j] = total + (0 if slack >= 0 else 10 * -slack)
-        return C
-
-    def _assign_packages(self, rpos):
-        waiting = [pid for pid, st in self.pstatus.items() if st == 'waiting']
-        free = [r for r in range(self.n) if self.assigned[r] is None and self.carrying[r] is None]
-        if not waiting or not free:
-            return
-        C = self._build_cost([rpos[r] for r in free], waiting)
-        assign = hungarian(C)
-        for i, r in enumerate(free):
-            j = assign[i]
-            if j < len(waiting) and C[i, j] < 1e6:
-                pid = waiting[j]
-                self.assigned[r] = pid
-                self.pstatus[pid] = 'assigned'
-                self.plan_needed = True
-
-    # ------------- goal selection incl. parking -------------
-    def _determine_goals(self, rpos):
-        goals = [None] * self.n
-        used = set()
-        occupied = set(rpos)
+                self.pinfo[pid]={'start':(sr-1,sc-1),'target':(tr-1,tc-1),'deadline':dl}
+                self.pstatus[pid]='waiting'
+    # assignment
+    def assign(self,rpos,t):
+        wait=[p for p,st in self.pstatus.items() if st=='waiting']
+        free=[r for r in range(self.n) if self.assigned[r] is None and self.carrying[r] is None]
+        if not wait or not free: return
+        C=np.full((max(len(free),len(wait)),)*2,1e6)
+        for i,r in enumerate(free):
+            for j,p in enumerate(wait):
+                info=self.pinfo[p]
+                tot=self.dist(rpos[r],info['start'])+self.dist(info['start'],info['target'])
+                slack=info['deadline']-(t+tot)
+                C[i,j]=tot+(0 if slack>=0 else 10*-slack)
+        sol=hungarian(C)
+        for i,r in enumerate(free):
+            j=sol[i]
+            if j<len(wait) and C[i,j]<1e6:
+                pid=wait[j]; self.assigned[r]=pid; self.pstatus[pid]='assigned'
+    # goals incl parking
+    def goals(self,rpos):
+        g=[None]*self.n; used=set(); occ=set(rpos)
         for r in range(self.n):
-            if self.carrying[r] is not None:
-                goals[r] = self.pinfo[self.carrying[r]]['target']
-            elif self.assigned[r] is not None:
-                goals[r] = self.pinfo[self.assigned[r]]['start']
-            if goals[r] is not None:
-                used.add(goals[r])
+            if self.carrying[r]: g[r]=self.pinfo[self.carrying[r]]['target']
+            elif self.assigned[r]: g[r]=self.pinfo[self.assigned[r]]['start']
+            if g[r]: used.add(g[r])
         for r in range(self.n):
-            if goals[r] is not None:
-                continue
-            best, bestd = None, 1e9
-            for p in self.parking_cells:
-                if p in used or p in occupied:
-                    continue
-                d = self._path_len(rpos[r], p)
-                if d < bestd:
-                    best, bestd = p, d
-            goals[r] = best if best else rpos[r]
-            used.add(goals[r])
-        return goals
-
-    # ------------- score joint paths -------------
-    def _score_paths(self, paths):
-        sc = 0
-        for rid, path in enumerate(paths):
-            sc += len(path)
-            pid = self.carrying[rid] if self.carrying[rid] else self.assigned[rid]
+            if g[r]: continue
+            best=None; bd=1e9
+            for p in self.parking:
+                if p in used or p in occ: continue
+                d=self.dist(rpos[r],p)
+                if d<bd: bd=d; best=p
+            g[r]=best if best else rpos[r]; used.add(g[r])
+        return g
+    # score
+    def score(self,paths,rpos,g):
+        sc=0
+        for r,p in enumerate(paths):
+            sc+=len(p)
+            pid=self.carrying[r] or self.assigned[r]
             if pid:
-                info = self.pinfo[pid]
-                finish = self.t + len(path) + self._path_len(path[-1], info['target'])
-                late = max(0, finish - info['deadline'])
-                sc += late * 10
+                info=self.pinfo[pid]
+                late=max(0,(len(p)+self.dist(p[-1],info['target']))-info['deadline'])
+                sc+=10*late
         return sc
-
-    # ------------- WPP + permutations -------------
-    def _wpp_plan(self, rpos, goals):
-        best_paths = self.wpp.plan_all(rpos, goals)
-        best_sc = self._score_paths(best_paths)
-        ids = list(range(self.n))
-        for _ in range(N_PERMUTATIONS):
-            random.shuffle(ids)
-            paths = self.wpp.plan_all(rpos, goals, order=ids)
-            sc = self._score_paths(paths)
-            if sc < best_sc:
-                best_paths, best_sc = paths, sc
-        return best_paths, best_sc
-
-    # ------------- CBS fallback -------------
-    def _cbs_plan(self, rpos, goals):
-        cbs = CBS(self.grid, CBS_HORIZON)
-        sol = cbs.find_solution(rpos, goals)
-        return sol
-
-    # ------------- convert joint path → deque of moves -------------
-    def _paths_to_queues(self, paths):
+    # force move
+    def force(self,pos,goal):
+        best=None;bd=1e9
+        for mv,(dr,dc) in MOVE_DIRS.items():
+            if mv=='S': continue
+            q=(pos[0]+dr,pos[1]+dc)
+            if 0<=q[0]<self.grid.shape[0] and 0<=q[1]<self.grid.shape[1] and self.grid[q]==0:
+                d=self.dist(q,goal)
+                if d<bd: bd=d; best=mv
+        return best or 'S'
+    # full plan
+    def plan(self,rpos,t):
+        g=self.goals(rpos); self.last_goals=g
+        paths=self.wpp.plan(rpos,g); best=self.score(paths,rpos,g)
+        order=list(range(self.n))
+        for _ in range(N_PERM):
+            random.shuffle(order)
+            p2=self.wpp.plan(rpos,g,order); s2=self.score(p2,rpos,g)
+            if s2<best: paths,best=p2,s2
+        lb=sum(self.dist(rpos[i],g[i]) for i in range(self.n))
+        if best>lb*THRESH:
+            sol=CBS(self.grid,CBS_H).solve(rpos,g)
+            if sol: paths=sol
+        self.plan_q={}
         for r in range(self.n):
-            moves = []
-            for k in range(1, len(paths[r])):
-                d = (paths[r][k][0] - paths[r][k - 1][0],
-                     paths[r][k][1] - paths[r][k - 1][1])
-                moves.append(DELTA_TO_MOVE.get(d, 'S'))
-            self.plan_q[r] = deque(moves or ['S'])
-
-    # ------------- planning wrapper -------------
-    def _plan_paths(self, rpos):
-        goals = self._determine_goals(rpos)
-        paths, sc = self._wpp_plan(rpos, goals)
-
-        lb = sum(self._path_len(rpos[i], goals[i]) for i in range(self.n))
-        if sc > lb * CBS_THRESHOLD_FACTOR:
-            cbs_paths = self._cbs_plan(rpos, goals)
-            if cbs_paths:
-                paths = cbs_paths
-        self._paths_to_queues(paths)
-
-    # ------------- simulator hooks -------------
-    def init_agents(self, state):
-        self.n = len(state['robots'])
-        self.grid = np.array(state['map'], int)
-        corr = longest_corridor(self.grid)
-        ratio = free_ratio(self.grid)
-        # longer look-ahead on tight maps
-        if corr >= 10 or ratio < 0.4:
-            self.H = min(60, corr * 3)
-        else:
-            self.H = max(8, corr + 3)
-        self.RH = self.H * 3
-        self.wpp = WPP(self.grid, self.H, self.RH)
-        self.parking_cells = self._find_parking_cells()
-
+            mv=[]
+            for k in range(1,len(paths[r])):
+                d=(paths[r][k][0]-paths[r][k-1][0],
+                   paths[r][k][1]-paths[r][k-1][1])
+                mv.append(DELTA2MOVE.get(d,'S'))
+            self.plan_q[r]=deque(mv or ['S'])
+    # main
+    def get_actions(self,state):
+        t=state['time_step']
+        self.viz.step(state['robots'],state['packages'])
+        self.upd_pkgs(state['packages'])
+        rpos=[]
+        for r,(row,col,carry) in enumerate(state['robots']):
+            pos=(row-1,col-1); rpos.append(pos)
+            if carry: self.carrying[r]=carry
+            elif self.carrying.get(r):
+                self.pstatus[self.carrying[r]]='done'; self.carrying[r]=None
+        self.assign(rpos,t)
+        self.plan(rpos,t)
+        acts=[]
         for r in range(self.n):
-            self.plan_q[r] = deque()
-            self.assigned[r] = self.carrying[r] = None
-            self.stationary[r] = 0
-
-    def get_actions(self, state):
-        self.t = state['time_step']
-        self._update_packages(state['packages'])
-
-        # ---- robot state ----
-        rpos = []
-        for r, (row, col, carry) in enumerate(state['robots']):
-            pos = (row - 1, col - 1)
-            rpos.append(pos)
-            self.stationary[r] = (self.stationary[r] + 1
-                                  if pos == self.prev_pos.get(r) else 0)
-            self.prev_pos[r] = pos
-            if carry:
-                self.carrying[r] = carry
-            elif self.carrying[r]:
-                self.pstatus[self.carrying[r]] = 'done'
-                self.carrying[r] = None
-
-        # ---- assignments & stalls ----
-        self._assign_packages(rpos)
-        if any(self.stationary[r] >= self.H for r in range(self.n)):
-            self.plan_needed = True
-            for r in range(self.n):
-                self.stationary[r] = 0
-
-        # ---- plan when needed ----
-        if self.plan_needed or any(len(self.plan_q[r]) == 0 for r in range(self.n)):
-            self._plan_paths(rpos)
-            self.plan_needed = False
-
-        # ---- emit actions ----
-        actions = []
-        for r in range(self.n):
-            move = self.plan_q[r].popleft() if self.plan_q[r] else 'S'
-            dr, dc = MOVE_DIRS[move]
-            nxt = (rpos[r][0] + dr, rpos[r][1] + dc)
-            pkg_act = '0'
-
-            # pick-up
+            mv=self.plan_q[r].popleft() if self.plan_q[r] else 'S'
+            if mv=='S': mv=self.force(rpos[r],self.last_goals[r])
+            dr,dc=MOVE_DIRS[mv]; nxt=(rpos[r][0]+dr,rpos[r][1]+dc)
+            act='0'
             if self.carrying[r] is None and self.assigned[r] is not None:
-                pid = self.assigned[r]
-                if nxt == self.pinfo[pid]['start']:
-                    pkg_act = '1'
-                    self.carrying[r] = pid
-                    self.pstatus[pid] = 'carrying'
-                    self.assigned[r] = None
-                    self.plan_needed = True
-            # drop-off
+                pid=self.assigned[r]
+                if nxt==self.pinfo[pid]['start']:
+                    act='1'; self.carrying[r]=pid; self.pstatus[pid]='carrying'; self.assigned[r]=None
             if self.carrying[r] is not None:
-                pid = self.carrying[r]
-                if nxt == self.pinfo[pid]['target']:
-                    pkg_act = '2'
-                    self.carrying[r] = None
-                    self.pstatus[pid] = 'done'
-                    self.plan_needed = True
-
-            actions.append((move, pkg_act))
-        return actions
+                pid=self.carrying[r]
+                if nxt==self.pinfo[pid]['target']:
+                    act='2'; self.carrying[r]=None; self.pstatus[pid]='done'
+            acts.append((mv,act))
+        return acts
