@@ -31,6 +31,7 @@ NODES=(                # custom-node GitHub repos
     "https://github.com/WASasquatch/was-node-suite-comfyui"
     "https://github.com/kijai/ComfyUI-KJNodes"
     "https://github.com/whitmell/ComfyUI-RvTools"
+    "https://github.com/Fannovel16/comfyui_controlnet_aux"
 )
 
 WORKFLOWS=( )
