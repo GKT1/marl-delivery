@@ -51,6 +51,7 @@ VAE_MODELS=(
 ESRGAN_MODELS=( )
 CONTROLNET_MODELS=(
     "https://civitai.com/api/download/models/1480637?type=Model&format=SafeTensor&token=c31e72d268968c10449529820d8b417f"
+    "https://civitai.com/api/download/models/1053985?type=Model&format=SafeTensor&token=c31e72d268968c10449529820d8b417f"
 )
 CLIP_VISION_MODELS=(
     # "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors"
