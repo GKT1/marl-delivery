@@ -85,8 +85,6 @@ function provisioning_start() {
     get_files "${COMFYUI_DIR}/models/diffusion_models" "${DIFFUSION_MODELS[@]}"
     get_files "${COMFYUI_DIR}/models/text_encoders" "${TEXT_ENCODERS_MODELS[@]}"
 
-    get_gdrive_files
-    get_gdrive_folders
     print_end
 }
 
