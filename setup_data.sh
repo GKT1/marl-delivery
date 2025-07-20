@@ -77,7 +77,7 @@ function provisioning_start() {
 
     get_files "${COMFYUI_DIR}/models/checkpoints" "${CHECKPOINT_MODELS[@]}"
     get_files "${COMFYUI_DIR}/models/unet"        "${UNET_MODELS[@]}"
-    get_files "${COMFYUI_DIR}/models/lora"        "${LORA_MODELS[@]}"
+    get_files "${COMFYUI_DIR}/models/loras"        "${LORA_MODELS[@]}"
     get_files "${COMFYUI_DIR}/models/controlnet"  "${CONTROLNET_MODELS[@]}"
     get_files "${COMFYUI_DIR}/models/vae"         "${VAE_MODELS[@]}"
     get_files "${COMFYUI_DIR}/models/esrgan"      "${ESRGAN_MODELS[@]}"
