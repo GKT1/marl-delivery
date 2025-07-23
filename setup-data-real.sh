@@ -39,7 +39,7 @@ WORKFLOWS=( )
 
 CHECKPOINT_MODELS=(
     #"https://civitai.com/api/download/models/1761560?type=Model&format=SafeTensor&size=pruned&fp=fp16"
-    "https://huggingface.co/lodestones/Chroma/resolve/main/chroma-unlocked-v46.safetensors"
+    
 )
 
 UNET_MODELS=( )
@@ -60,6 +60,7 @@ CLIP_VISION_MODELS=(
 )
 DIFFUSION_MODELS=(
     # "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors"
+    "https://huggingface.co/lodestones/Chroma/resolve/main/chroma-unlocked-v46.safetensors"
 )
 TEXT_ENCODERS_MODELS=(
     # "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
