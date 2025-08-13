@@ -166,7 +166,7 @@ function download() {                  # $1 url , $2 dir
 
     [[ -f $dir/${url##*/} ]] && return
     if [[ -n $auth ]]; then
-        wget --header="Authorization: Bearer $auth" -qnc --content-disposition \
+        wget --header="Authorization: Bearer $auth" -nc --content-disposition \
              --show-progress -e dotbytes=4M -P "$dir" "$url"
     else
         wget -qnc --content-disposition --show-progress -e dotbytes=4M \
