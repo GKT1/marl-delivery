@@ -39,6 +39,25 @@ WORKFLOWS=( )
 
 CHECKPOINT_MODELS=(
     "https://civitai.com/api/download/models/1761560?type=Model&format=SafeTensor&size=pruned&fp=fp16"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000001.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000002.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000003.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000004.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000005.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000006.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000007.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000008.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000009.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000010.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000011.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000012.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000013.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000014.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000015.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000016.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000017.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000018.safetensors"
+    "https://huggingface.co/GKT/kohya1/resolve/main/new%20model.safetensors"
 )
 
 UNET_MODELS=( )
