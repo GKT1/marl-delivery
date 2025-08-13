@@ -39,6 +39,11 @@ WORKFLOWS=( )
 
 CHECKPOINT_MODELS=(
     "https://civitai.com/api/download/models/1761560?type=Model&format=SafeTensor&size=pruned&fp=fp16"
+)
+
+UNET_MODELS=( )
+LORA_MODELS=(
+    "https://huggingface.co/GKT/lora1_rank32_fp16-step01000/resolve/main/lora1_rank32_fp16-step01000.safetensors"
     "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000001.safetensors"
     "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000002.safetensors"
     "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000003.safetensors"
@@ -58,11 +63,6 @@ CHECKPOINT_MODELS=(
     "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000017.safetensors"
     "https://huggingface.co/GKT/kohya1/resolve/main/new%20model-000018.safetensors"
     "https://huggingface.co/GKT/kohya1/resolve/main/new%20model.safetensors"
-)
-
-UNET_MODELS=( )
-LORA_MODELS=(
-    "https://huggingface.co/GKT/lora1_rank32_fp16-step01000/resolve/main/lora1_rank32_fp16-step01000.safetensors"
 )
 VAE_MODELS=(
     # "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors"
