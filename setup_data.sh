@@ -44,25 +44,6 @@ CHECKPOINT_MODELS=(
 UNET_MODELS=( )
 LORA_MODELS=(
     "https://huggingface.co/GKT/lora1_rank32_fp16-step01000/resolve/main/lora1_rank32_fp16-step01000.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000001.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000002.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000003.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000004.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000005.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000006.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000007.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000008.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000009.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000010.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000011.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000012.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000013.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000014.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000015.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000016.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000017.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2-000018.safetensors"
-    "https://huggingface.co/GKT/kohya2/resolve/main/kohya2.safetensors"
 )
 VAE_MODELS=(
     # "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors"
